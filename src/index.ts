@@ -92,8 +92,28 @@ type Handler<P extends string, S extends RouteSchema | undefined = undefined> = 
     app: BXO
 ) => Response | string | BunFile | Promise<Response | string | BunFile>
 
+// WebSocket client information type
+export type WebSocketClientInfo = {
+    id: string; // Short, unique identifier for the WebSocket connection
+    path: string;
+    ip: string;
+    userAgent: string;
+    origin: string;
+    host: string;
+    connectionId: string; // Longer, more detailed connection identifier
+    cookies: Record<string, string>; // Parsed cookies from the handshake
+    searchParams: Record<string, string | string[]>; // Query parameters from the URL
+    authorization?: string; // Authorization header (Bearer token, Basic auth, etc.)
+};
+
+// WebSocket data interface - this is what you get when accessing ws.data
+export interface WebSocketData extends WebSocketClientInfo {
+    // Simple interface with just the data properties
+    // No convenience methods - use direct property access
+}
+
 // WebSocket handler types
-export type WebSocketHandler<T = any> = {
+export type WebSocketHandler<T = WebSocketData> = {
     message?(ws: Bun.ServerWebSocket<T>, message: string | Buffer): void | Promise<void>;
     open?(ws: Bun.ServerWebSocket<T>): void | Promise<void>;
     close?(ws: Bun.ServerWebSocket<T>, code: number, reason: string): void | Promise<void>;
@@ -326,19 +346,10 @@ function toResponse(body: unknown, init?: ResponseInit): Response {
         body instanceof Blob ||
         body instanceof ReadableStream
     ) {
-        // Set default Content-Type to text/html if not already specified
-        const headers = new Headers(init?.headers);
-        if (!headers.has('Content-Type')) {
-            headers.set('Content-Type', 'text/html');
-        }
-        return new Response(body as BodyInit, { ...init, headers });
+        return new Response(body as BodyInit, { ...init, headers: init?.headers });
     }
     // Fallback: stringify unknown values
-    const headers = new Headers(init?.headers);
-    if (!headers.has('Content-Type')) {
-        headers.set('Content-Type', 'text/html');
-    }
-    return new Response(String(body), { ...init, headers });
+    return new Response(String(body), { ...init, headers: init?.headers });
 }
 
 export default class BXO {
@@ -445,22 +456,22 @@ export default class BXO {
 
         // Create WebSocket configuration if we have WebSocket routes
         const websocketConfig = hasWebSocketRoutes ? {
-            message: (ws: Bun.ServerWebSocket<{ path: string }>, message: string | Buffer) => {
+            message: (ws: Bun.ServerWebSocket<WebSocketData>, message: string | Buffer) => {
                 this.handleWebSocketMessage(ws, message);
             },
-            open: (ws: Bun.ServerWebSocket<{ path: string }>) => {
+            open: (ws: Bun.ServerWebSocket<WebSocketData>) => {
                 this.handleWebSocketOpen(ws);
             },
-            close: (ws: Bun.ServerWebSocket<{ path: string }>, code: number, reason: string) => {
+            close: (ws: Bun.ServerWebSocket<WebSocketData>, code: number, reason: string) => {
                 this.handleWebSocketClose(ws, code, reason);
             },
-            drain: (ws: Bun.ServerWebSocket<{ path: string }>) => {
+            drain: (ws: Bun.ServerWebSocket<WebSocketData>) => {
                 this.handleWebSocketDrain(ws);
             },
-            ping: (ws: Bun.ServerWebSocket<{ path: string }>, data: Buffer) => {
+            ping: (ws: Bun.ServerWebSocket<WebSocketData>, data: Buffer) => {
                 this.handleWebSocketPing(ws, data);
             },
-            pong: (ws: Bun.ServerWebSocket<{ path: string }>, data: Buffer) => {
+            pong: (ws: Bun.ServerWebSocket<WebSocketData>, data: Buffer) => {
                 this.handleWebSocketPong(ws, data);
             }
         } : undefined;
@@ -476,8 +487,49 @@ export default class BXO {
                         const url = new URL(req.url);
                         const wsRoute = this.findWebSocketRoute(url.pathname);
                         if (wsRoute) {
+                            // Capture client information during handshake
+                            const shortId = Math.random().toString(36).substr(2, 8);
+                            const connectionId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+                            const cookieHeader = req.headers.get("cookie");
+                            const authHeader = req.headers.get("authorization");
+                            
+                            // Parse search parameters from URL
+                            const searchParams: Record<string, string | string[]> = {};
+                            for (const [key, value] of url.searchParams.entries()) {
+                                if (key in searchParams) {
+                                    const existing = searchParams[key];
+                                    if (Array.isArray(existing)) {
+                                        existing.push(value);
+                                    } else {
+                                        searchParams[key] = [existing as string, value];
+                                    }
+                                } else {
+                                    searchParams[key] = value;
+                                }
+                            }
+                            
+                            const baseClientInfo = {
+                                id: shortId, // Short, easy-to-use ID
+                                path: url.pathname,
+                                ip: req.headers.get("x-forwarded-for") || 
+                                    req.headers.get("x-real-ip") || 
+                                    "unknown",
+                                userAgent: req.headers.get("user-agent") || "unknown",
+                                origin: req.headers.get("origin") || "unknown",
+                                host: req.headers.get("host") || "unknown",
+                                connectionId: connectionId, // Longer, more detailed ID
+                                cookies: cookieHeader ? parseCookies(cookieHeader) : {},
+                                searchParams: searchParams, // Query parameters from URL
+                                authorization: authHeader || undefined // Authorization header
+                            };
+
+                            // Create simple WebSocket data object
+                            const clientInfo: WebSocketData = {
+                                ...baseClientInfo
+                            };
+                            
                             const success = server.upgrade(req, {
-                                data: { path: url.pathname }
+                                data: clientInfo
                             });
                             if (success) {
                                 return; // WebSocket upgrade successful
@@ -542,7 +594,7 @@ export default class BXO {
         return null;
     }
 
-    private handleWebSocketMessage(ws: Bun.ServerWebSocket<{ path: string }>, message: string | Buffer): void {
+    private handleWebSocketMessage(ws: Bun.ServerWebSocket<WebSocketData>, message: string | Buffer): void {
         const route = this.findWebSocketRoute(ws.data?.path || "");
         if (route?.websocketHandler?.message) {
             try {
@@ -553,7 +605,7 @@ export default class BXO {
         }
     }
 
-    private handleWebSocketOpen(ws: Bun.ServerWebSocket<{ path: string }>): void {
+    private handleWebSocketOpen(ws: Bun.ServerWebSocket<WebSocketData>): void {
         const route = this.findWebSocketRoute(ws.data?.path || "");
         if (route?.websocketHandler?.open) {
             try {
@@ -564,7 +616,7 @@ export default class BXO {
         }
     }
 
-    private handleWebSocketClose(ws: Bun.ServerWebSocket<{ path: string }>, code: number, reason: string): void {
+    private handleWebSocketClose(ws: Bun.ServerWebSocket<WebSocketData>, code: number, reason: string): void {
         const route = this.findWebSocketRoute(ws.data?.path || "");
         if (route?.websocketHandler?.close) {
             try {
@@ -575,7 +627,7 @@ export default class BXO {
         }
     }
 
-    private handleWebSocketDrain(ws: Bun.ServerWebSocket<{ path: string }>): void {
+    private handleWebSocketDrain(ws: Bun.ServerWebSocket<WebSocketData>): void {
         const route = this.findWebSocketRoute(ws.data?.path || "");
         if (route?.websocketHandler?.drain) {
             try {
@@ -586,7 +638,7 @@ export default class BXO {
         }
     }
 
-    private handleWebSocketPing(ws: Bun.ServerWebSocket<{ path: string }>, data: Buffer): void {
+    private handleWebSocketPing(ws: Bun.ServerWebSocket<WebSocketData>, data: Buffer): void {
         const route = this.findWebSocketRoute(ws.data?.path || "");
         if (route?.websocketHandler?.ping) {
             try {
@@ -597,7 +649,7 @@ export default class BXO {
         }
     }
 
-    private handleWebSocketPong(ws: Bun.ServerWebSocket<{ path: string }>, data: Buffer): void {
+    private handleWebSocketPong(ws: Bun.ServerWebSocket<WebSocketData>, data: Buffer): void {
         const route = this.findWebSocketRoute(ws.data?.path || "");
         if (route?.websocketHandler?.pong) {
             try {
