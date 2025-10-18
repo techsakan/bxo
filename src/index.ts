@@ -82,6 +82,7 @@ export type Context<P extends string = string, S extends RouteSchema | undefined
     };
     json: <T>(data: T, status?: number) => Response;
     text: (data: string, status?: number) => Response;
+    html: (data: string, status?: number) => Response;
     status: <T extends number>(status: T, data: InferResponse<S, T>) => Response;
     redirect: (url: string, status?: 301 | 302 | 303 | 307 | 308) => Response;
 };
@@ -195,11 +196,14 @@ function parseQuery<T extends z.ZodTypeAny>(searchParams: URLSearchParams, schem
 function parseQuery(searchParams: URLSearchParams, schema?: z.ZodTypeAny): any {
     const out: QueryObject = {};
     for (const [k, v] of searchParams.entries()) {
-        if (k in out) {
-            const existing = out[k];
-            if (Array.isArray(existing)) out[k] = [...existing, v];
-            else out[k] = [existing as string, v];
-        } else out[k] = v;
+        // Handle array notation like fields[] -> fields
+        const key = k.endsWith('[]') ? k.slice(0, -2) : k;
+        
+        if (key in out) {
+            const existing = out[key];
+            if (Array.isArray(existing)) out[key] = [...existing, v];
+            else out[key] = [existing as string, v];
+        } else out[key] = v;
     }
     if (schema) {
         return (schema as any).parse ? (schema as any).parse(out) : out;
@@ -806,6 +810,19 @@ export default class BXO {
                 return new Response(String(data), {
                     status,
                     headers: { "Content-Type": "text/plain" }
+                });
+            },
+            html: (data, status = 200) => {
+                if (route.schema?.response?.[status]) {
+                    const sch = route.schema.response[status]!;
+                    const res = (sch as any).safeParse ? (sch as any).safeParse(data) : { success: true };
+                    if (!res.success) {
+                        return new Response(JSON.stringify({ error: "Invalid response", issues: res.error?.issues ?? [] }), { status: 500, headers: { "Content-Type": "application/json" } });
+                    }
+                }
+                return new Response(String(data), {
+                    status,
+                    headers: { "Content-Type": "text/html; charset=utf-8" }
                 });
             },
             status: (status, data) => {

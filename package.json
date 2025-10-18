@@ -5,7 +5,7 @@
     ".": "./src/index.ts",
     "./plugins": "./plugins/index.ts"
   },
-  "version": "0.0.10-dev.2",
+  "version": "0.0.10-dev.4",
   "type": "module",
   "devDependencies": {
     "@types/bun": "latest"
